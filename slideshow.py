@@ -15,6 +15,8 @@ Controls:
 """
 
 import argparse
+import ctypes
+import ctypes.util
 import math
 import os
 import random
@@ -250,6 +252,36 @@ def render_kb_frame(surface: pygame.Surface, screen_w: int, screen_h: int,
     return pygame.transform.smoothscale(crop, (screen_w, screen_h))
 
 
+class _NSRect(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double),
+                ("w", ctypes.c_double), ("h", ctypes.c_double)]
+
+
+def raise_above_menu_bar():
+    """macOS only: lift pygame window to top and stretch over the whole screen"""
+    try:
+        objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+
+        def send(obj, selector, restype=None, *args):
+            argtypes = [type(a) if isinstance(a, ctypes.Structure) else ctypes.c_long for a in args]
+            fn = ctypes.CFUNCTYPE(restype, ctypes.c_void_p, ctypes.c_void_p, *argtypes)(("objc_msgSend", objc))
+            return fn(obj, objc.sel_registerName(selector), *args)
+
+        get_pointer = ctypes.pythonapi.PyCapsule_GetPointer
+        get_pointer.restype = ctypes.c_void_p
+        get_pointer.argtypes = [ctypes.py_object, ctypes.c_char_p]
+        window = get_pointer(pygame.display.get_wm_info()["window"], b"window")
+
+        nsscreen = send(window, b"screen", ctypes.c_void_p)
+        frame = send(nsscreen, b"frame", _NSRect)
+        send(window, b"setLevel:", None, 25)  # NSStatusWindowLevel, above the menu bar
+        send(window, b"setFrame:display:", None, frame, 1)
+    except Exception as e:
+        print(f"Could not cover the menu bar: {e}", file=sys.stderr)
+
+
 def collect_photos(path: str) -> list:
     p = Path(path)
     if p.is_file():
@@ -302,11 +334,10 @@ def main():
               f"Using display 0.", file=sys.stderr)
         args.display = 0
 
-    display_bounds = pygame.display.get_desktop_sizes()
-    screen_w, screen_h = display_bounds[args.display]
-    screen = pygame.display.set_mode(
-        (screen_w, screen_h), pygame.FULLSCREEN | pygame.NOFRAME, display=args.display
-    )
+    screen_w, screen_h = pygame.display.get_desktop_sizes()[args.display]
+    screen = pygame.display.set_mode((screen_w, screen_h), pygame.NOFRAME, display=args.display)
+    if sys.platform == "darwin":
+        raise_above_menu_bar()
     pygame.display.set_caption("Slideshow")
     pygame.mouse.set_visible(False)
 
