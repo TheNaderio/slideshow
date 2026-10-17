@@ -125,6 +125,7 @@ On first run, macOS will prompt you to grant Photos library access — this is e
 |-----|--------|
 | Right arrow / Space | Next photo |
 | Left arrow | Previous photo |
+| P | Pause / resume |
 | Q / Escape | Quit |
 
 ## Supported formats

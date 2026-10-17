@@ -11,11 +11,13 @@ Usage:
 Controls:
     Right arrow / Space  — next photo
     Left arrow           — previous photo
+    P                    — pause / resume
     Q / Escape           — quit
 """
 
 import argparse
 import ctypes
+import json
 import ctypes.util
 import math
 import os
@@ -302,16 +304,46 @@ def collect_photos(path: str) -> list:
     return photos
 
 
+CONTROL_EVENT = pygame.USEREVENT + 1
+
+
+def read_control_commands():
+    """Forward commands from stdin (one per line, e.g. "next", "delay 8") to the
+    event loop. Used by gui.py, which runs the slideshow as a subprocess."""
+    for line in sys.stdin:
+        parts = line.split()
+        if parts:
+            pygame.event.post(pygame.event.Event(CONTROL_EVENT, command=parts[0], args=parts[1:]))
+    # stdin closed: the GUI is gone, so stop too
+    pygame.event.post(pygame.event.Event(CONTROL_EVENT, command="quit", args=[]))
+
+
+def list_displays():
+    pygame.init()
+    sizes = pygame.display.get_desktop_sizes()
+    print(json.dumps([{"index": i, "width": w, "height": h} for i, (w, h) in enumerate(sizes)]))
+
+
 def main():
     parser = argparse.ArgumentParser(description="Full-screen photo slideshow")
-    parser.add_argument("path", help="Photo file or folder")
+    parser.add_argument("path", nargs="?", help="Photo file or folder")
     parser.add_argument("--delay", type=float, default=4.0,
                         help="Seconds each slide is shown (default: 7)")
     parser.add_argument("--no-shuffle", action="store_true",
                         help="Show photos in alphabetical order")
     parser.add_argument("--display", type=int, default=0,
                         help="Display index to use (0 = primary, 1 = second screen, etc.)")
+    parser.add_argument("--list-displays", action="store_true",
+                        help="Print the available displays as JSON and exit")
+    parser.add_argument("--control", action="store_true",
+                        help="Read commands from stdin and print status as JSON lines (used by gui.py)")
     args = parser.parse_args()
+
+    if args.list_displays:
+        list_displays()
+        return
+    if args.path is None:
+        parser.error("the following arguments are required: path")
 
     photos = collect_photos(args.path)
     if not args.no_shuffle:
@@ -323,12 +355,13 @@ def main():
     RESET = "\033[0m"
     SEP   = f"{DIM}{'─' * 40}{RESET}"
 
-    print(SEP)
-    print(f"{BOLD}{CYAN}  Found {len(photos)} photo(s).{RESET}  {DIM}delay: {args.delay}s · display: {args.display} · Q/Esc to quit{RESET}")
-    for i in range(5, -1, -1):
-        print(f"\r{CYAN}  Starting slideshow in {i}...{RESET}", end="", flush=True)
-        time.sleep(1)
-    print(f"\n{SEP}")
+    if not args.control:
+        print(SEP)
+        print(f"{BOLD}{CYAN}  Found {len(photos)} photo(s).{RESET}  {DIM}delay: {args.delay}s · display: {args.display} · Q/Esc to quit{RESET}")
+        for i in range(5, -1, -1):
+            print(f"\r{CYAN}  Starting slideshow in {i}...{RESET}", end="", flush=True)
+            time.sleep(1)
+        print(f"\n{SEP}")
 
     pygame.init()
 
@@ -389,17 +422,33 @@ def main():
         return texture, crect, focus
 
     # --- slide stack ---
-    # Photos stacked bottom to top, each {"texture", "crect", "kb", "start"}.
+    # Photos stacked bottom to top, each {"texture", "crect", "kb", "start", "shown"}.
     # The top one is the current photo. Each fades in over the ones below it, which
     # keep animating, so skipping quickly layers fades instead of cutting them off.
+    # "shown" is real time and drives the fade, so skipping still fades while paused.
+    # "start" is on the slide clock, which stops while paused, and drives Ken Burns
+    # and auto-advance.
 
     index = 0
     slides = []
+    paused_at = None      # real ticks when paused, None while running
+    paused_total = 0      # ms spent paused, so the slide clock skips them
+
+    def slide_clock():
+        if paused_at is not None:
+            return paused_at - paused_total
+        return pygame.time.get_ticks() - paused_total
+
+    def report_status():
+        if args.control:
+            print(json.dumps({"index": index, "total": len(photos), "paused": paused_at is not None,
+                              "delay": delay_ms / 1000, "photo": os.path.basename(photos[index])}),
+                  flush=True)
 
     def push_slide(idx):
         texture, crect, focus = get_image(idx)
         slides.append({"texture": texture, "crect": crect, "kb": new_kb_params(focus),
-                       "start": pygame.time.get_ticks()})
+                       "start": slide_clock(), "shown": pygame.time.get_ticks()})
 
     def advance(step):
         nonlocal index
@@ -407,10 +456,34 @@ def main():
         push_slide(index)
         if step > 0:
             preload((index + 1) % len(photos))
+        report_status()
+
+    def set_paused(paused):
+        nonlocal paused_at, paused_total
+        if paused and paused_at is None:
+            paused_at = pygame.time.get_ticks()
+        elif not paused and paused_at is not None:
+            paused_total += pygame.time.get_ticks() - paused_at
+            paused_at = None
+        report_status()
+
+    def set_delay(seconds):
+        nonlocal delay_ms
+        new_ms = int(max(1.0, seconds) * 1000)
+        # Keep each photo's Ken Burns position where it is, only change its pace
+        now = slide_clock()
+        for slide in slides:
+            slide["start"] = now - (now - slide["start"]) * new_ms / delay_ms
+        delay_ms = new_ms
+        report_status()
 
     push_slide(index)
-    slides[0]["start"] -= trans_ms  # first photo appears without fading in
+    slides[0]["shown"] -= trans_ms  # first photo appears without fading in
     preload((index + 1) % len(photos))
+    report_status()
+
+    if args.control:
+        threading.Thread(target=read_control_commands, daemon=True).start()
 
     running = True
 
@@ -425,14 +498,33 @@ def main():
                     advance(1)
                 elif event.key == pygame.K_LEFT:
                     advance(-1)
+                elif event.key == pygame.K_p:
+                    set_paused(paused_at is None)
+            elif event.type == CONTROL_EVENT:
+                if event.command == "quit":
+                    running = False
+                elif event.command == "next":
+                    advance(1)
+                elif event.command == "prev":
+                    advance(-1)
+                elif event.command == "pause":
+                    set_paused(True)
+                elif event.command == "resume":
+                    set_paused(False)
+                elif event.command == "delay" and event.args:
+                    try:
+                        set_delay(float(event.args[0]))
+                    except ValueError:
+                        pass
 
         # Read the clock after handling keys: a manual skip loads the next photo
         # synchronously and sets its start, which must not be later than now
         now = pygame.time.get_ticks()
+        slide_now = slide_clock()
 
         # Drop photos hidden under one that has fully faded in
         for i in range(len(slides) - 1, 0, -1):
-            if slides[i]["texture"] is not None and now - slides[i]["start"] >= trans_ms:
+            if slides[i]["texture"] is not None and now - slides[i]["shown"] >= trans_ms:
                 del slides[:i]
                 break
 
@@ -440,15 +532,14 @@ def main():
         for slide in slides:
             if slide["texture"] is None:
                 continue
-            elapsed = now - slide["start"]
-            alpha = min(255, int(255 * elapsed / trans_ms))
+            alpha = min(255, int(255 * (now - slide["shown"]) / trans_ms))
             # Ken Burns t keeps running from the start of the fade-in, so motion is continuous
-            draw_kb_frame(slide["texture"], screen_w, screen_h, min(1.0, elapsed / delay_ms),
-                          slide["kb"], slide["crect"], alpha)
+            t = min(1.0, (slide_now - slide["start"]) / delay_ms)
+            draw_kb_frame(slide["texture"], screen_w, screen_h, t, slide["kb"], slide["crect"], alpha)
         renderer.present()
 
         # Auto-advance
-        if now - slides[-1]["start"] >= delay_ms:
+        if slide_now - slides[-1]["start"] >= delay_ms:
             advance(1)
 
     pygame.quit()
