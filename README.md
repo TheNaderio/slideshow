@@ -1,5 +1,7 @@
 # slideshow
 
+> **Fork notice:** This is a fork of [bhicks329/slideshow](https://github.com/bhicks329/slideshow) by Ben Hicks. It adds a browser GUI for picking photos, exporting albums and controlling the running slideshow, pause and live delay changes, smoother GPU-rendered Ken Burns motion, and fixes for multi-monitor setups on macOS. 
+
 A fullscreen photo slideshow for macOS with Ken Burns pan/zoom effects, cross-fade transitions, and optional face-detection-guided panning.
 
 ## Background
@@ -28,7 +30,7 @@ Apple Photos' built-in slideshow is great, but it doesn't let you control how lo
 ## Setup
 
 ```bash
-git clone https://github.com/bhicks329/slideshow.git
+git clone https://github.com/TheNaderio/slideshow.git
 cd slideshow
 ```
 
