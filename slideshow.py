@@ -28,6 +28,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pygame
+from pygame._sdl2.video import Renderer, Texture
 from PIL import Image, ImageOps
 
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".tif", ".heic", ".webp"}
@@ -45,7 +46,6 @@ KB_ZOOM_TRAVEL = 0.08
 KB_PAN_DRIFT = 0.75
 
 TRANSITION_SECS = 1.0  # cross-fade duration
-FPS = 60
 
 
 def detect_black_borders(img: Image.Image) -> tuple:
@@ -160,7 +160,7 @@ def prepare_image(path: str, screen_w: int, screen_h: int) -> tuple:
     canvas, content_rect = fit_to_screen(img, over_w, over_h)
 
     # Convert face position (fraction of image) → pan coordinate (fraction of pan range).
-    # In render_kb_frame, ox = cx + px * (cw - viewport_w), so px=0 puts the viewport's
+    # In kb_viewport, ox = cx + px * (cw - viewport_w), so px=0 puts the viewport's
     # left edge at the content left, and px=1 puts it at the right.  To *center* the face
     # we need: cx + px*(cw-vw) + vw/2 == cx + fx*cw  →  px = (fx*cw - vw/2) / (cw - vw)
     focus_point = None
@@ -211,12 +211,13 @@ def new_kb_params(focus_point=None) -> dict:
     }
 
 
-def render_kb_frame(surface: pygame.Surface, screen_w: int, screen_h: int,
-                    t: float, kb: dict, content_rect: tuple) -> pygame.Surface:
+def kb_viewport(t: float, kb: dict, content_rect: tuple, canvas_size: tuple,
+                screen_w: int, screen_h: int) -> tuple:
     """
-    Return a (screen_w x screen_h) surface with Ken Burns pan/zoom applied.
+    Return the (x, y, w, h) part of the oversized canvas to show at time t, as floats
+    so pan and zoom move by fractions of a pixel instead of stepping.
     t: 0.0 (slide start) → 1.0 (slide end).
-    content_rect: (x, y, w, h) of the actual image within the oversized surface.
+    content_rect: (x, y, w, h) of the actual image within the oversized canvas.
     Pan is constrained to stay within content_rect so black borders never appear.
     """
     zoom = kb["zoom_start"] + (kb["zoom_end"] - kb["zoom_start"]) * t
@@ -226,30 +227,32 @@ def render_kb_frame(surface: pygame.Surface, screen_w: int, screen_h: int,
     cx, cy, cw, ch = content_rect
 
     # Viewport size: smaller = more zoomed in
-    viewport_w = int(screen_w / zoom)
-    viewport_h = int(screen_h / zoom)
+    viewport_w = screen_w / zoom
+    viewport_h = screen_h / zoom
 
     # Pan range within image content only
-    pan_range_x = max(0, cw - viewport_w)
-    pan_range_y = max(0, ch - viewport_h)
+    pan_range_x = max(0.0, cw - viewport_w)
+    pan_range_y = max(0.0, ch - viewport_h)
 
     # If viewport is wider/taller than the image, center on the image content
-    if pan_range_x > 0:
-        ox = cx + int(px * pan_range_x)
-    else:
-        ox = cx + (cw - viewport_w) // 2
+    ox = cx + px * pan_range_x if pan_range_x > 0 else cx + (cw - viewport_w) / 2
+    oy = cy + py * pan_range_y if pan_range_y > 0 else cy + (ch - viewport_h) / 2
 
-    if pan_range_y > 0:
-        oy = cy + int(py * pan_range_y)
-    else:
-        oy = cy + (ch - viewport_h) // 2
+    src_w, src_h = canvas_size
+    ox = max(0.0, min(src_w - viewport_w, ox))
+    oy = max(0.0, min(src_h - viewport_h, oy))
+    return ox, oy, viewport_w, viewport_h
 
-    src_w, src_h = surface.get_size()
-    ox = max(0, min(src_w - viewport_w, ox))
-    oy = max(0, min(src_h - viewport_h, oy))
 
-    crop = surface.subsurface((ox, oy, viewport_w, viewport_h))
-    return pygame.transform.smoothscale(crop, (screen_w, screen_h))
+def draw_kb_frame(texture, screen_w: int, screen_h: int, t: float, kb: dict,
+                  content_rect: tuple, alpha: int = 255):
+    """Draw texture with Ken Burns pan/zoom applied, filling the screen."""
+    ox, oy, vw, _ = kb_viewport(t, kb, content_rect, (texture.width, texture.height),
+                                screen_w, screen_h)
+    scale = screen_w / vw
+    texture.alpha = alpha
+    texture.draw(dstrect=pygame.FRect(-ox * scale, -oy * scale,
+                                      texture.width * scale, texture.height * scale))
 
 
 class _NSRect(ctypes.Structure):
@@ -263,16 +266,16 @@ def raise_above_menu_bar():
         objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
         objc.sel_registerName.restype = ctypes.c_void_p
         objc.sel_registerName.argtypes = [ctypes.c_char_p]
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
 
         def send(obj, selector, restype=None, *args):
             argtypes = [type(a) if isinstance(a, ctypes.Structure) else ctypes.c_long for a in args]
             fn = ctypes.CFUNCTYPE(restype, ctypes.c_void_p, ctypes.c_void_p, *argtypes)(("objc_msgSend", objc))
             return fn(obj, objc.sel_registerName(selector), *args)
 
-        get_pointer = ctypes.pythonapi.PyCapsule_GetPointer
-        get_pointer.restype = ctypes.c_void_p
-        get_pointer.argtypes = [ctypes.py_object, ctypes.c_char_p]
-        window = get_pointer(pygame.display.get_wm_info()["window"], b"window")
+        app = send(objc.objc_getClass(b"NSApplication"), b"sharedApplication", ctypes.c_void_p)
+        window = send(send(app, b"windows", ctypes.c_void_p), b"firstObject", ctypes.c_void_p)
 
         nsscreen = send(window, b"screen", ctypes.c_void_p)
         frame = send(nsscreen, b"frame", _NSRect)
@@ -324,8 +327,6 @@ def main():
         time.sleep(1)
     print(f"\n{SEP}")
 
-    os.environ.setdefault("SDL_VIDEO_FULLSCREEN_HEAD", str(args.display))
-
     pygame.init()
 
     num_displays = pygame.display.get_num_displays()
@@ -334,11 +335,16 @@ def main():
               f"Using display 0.", file=sys.stderr)
         args.display = 0
 
+    # Linear filtering makes sub-pixel pan/zoom positions blend smoothly
+    os.environ["SDL_RENDER_SCALE_QUALITY"] = "linear"
     screen_w, screen_h = pygame.display.get_desktop_sizes()[args.display]
-    screen = pygame.display.set_mode((screen_w, screen_h), pygame.NOFRAME, display=args.display)
+    on_display = 0x2FFF0000 | args.display  # SDL_WINDOWPOS_CENTERED_DISPLAY
+    window = pygame.Window("Slideshow", size=(screen_w, screen_h),
+                           position=(on_display, on_display), borderless=True)
+    renderer = Renderer(window, vsync=True)
+    renderer.draw_color = (0, 0, 0, 255)
     if sys.platform == "darwin":
         raise_above_menu_bar()
-    pygame.display.set_caption("Slideshow")
     pygame.mouse.set_visible(False)
 
     delay_ms = int(args.delay * 1000)
@@ -367,11 +373,17 @@ def main():
         t.start()
 
     def get_image(idx):
-        """Return (surface, content_rect) for idx, loading synchronously if not cached."""
+        """Return (texture, content_rect, focus_point) for idx, loading synchronously if not cached."""
         with _preload_lock:
-            if idx in _preload_cache:
-                return _preload_cache.pop(idx)
-        return load_image(idx)
+            result = _preload_cache.pop(idx, None)
+        if result is None:
+            result = load_image(idx)
+        surface, crect, focus = result
+        if surface is None:
+            return None, None, None
+        texture = Texture.from_surface(renderer, surface)
+        texture.blend_mode = 1  # SDL_BLENDMODE_BLEND, so alpha works for the cross-fade
+        return texture, crect, focus
 
     # --- initial state ---
 
@@ -389,7 +401,6 @@ def main():
     transitioning = False
     frozen_frame = None         # last Ken Burns frame of current slide, used during fade-out
 
-    clock = pygame.time.Clock()
     running = True
 
     def begin_transition():
@@ -401,7 +412,7 @@ def main():
         elapsed = now - slide_start
         t = min(1.0, elapsed / delay_ms)
         if current_surface and current_kb and current_crect:
-            frozen_frame = render_kb_frame(current_surface, screen_w, screen_h, t, current_kb, current_crect)
+            frozen_frame = (current_surface, current_kb, current_crect, t)
         else:
             frozen_frame = None
 
@@ -422,7 +433,7 @@ def main():
         elapsed = now - slide_start
         t = min(1.0, elapsed / delay_ms)
         if current_surface and current_kb and current_crect:
-            frozen_frame = render_kb_frame(current_surface, screen_w, screen_h, t, current_kb, current_crect)
+            frozen_frame = (current_surface, current_kb, current_crect, t)
         else:
             frozen_frame = None
 
@@ -451,16 +462,15 @@ def main():
             alpha = min(255, int(255 * trans_elapsed / trans_ms))
 
             # Draw frozen outgoing frame
-            screen.fill((0, 0, 0))
+            renderer.clear()
             if frozen_frame:
-                screen.blit(frozen_frame, (0, 0))
+                tex, kb, crect, t_frozen = frozen_frame
+                draw_kb_frame(tex, screen_w, screen_h, t_frozen, kb, crect)
 
             # Draw incoming frame with increasing alpha
             if next_surface and next_kb and next_crect:
                 t_next = min(1.0, trans_elapsed / delay_ms)
-                incoming = render_kb_frame(next_surface, screen_w, screen_h, t_next, next_kb, next_crect)
-                incoming.set_alpha(alpha)
-                screen.blit(incoming, (0, 0))
+                draw_kb_frame(next_surface, screen_w, screen_h, t_next, next_kb, next_crect, alpha)
 
             if trans_elapsed >= trans_ms:
                 # Transition done — next becomes current.
@@ -478,17 +488,15 @@ def main():
             slide_elapsed = now - slide_start
             t = min(1.0, slide_elapsed / delay_ms)
 
-            screen.fill((0, 0, 0))
+            renderer.clear()
             if current_surface and current_kb and current_crect:
-                frame = render_kb_frame(current_surface, screen_w, screen_h, t, current_kb, current_crect)
-                screen.blit(frame, (0, 0))
+                draw_kb_frame(current_surface, screen_w, screen_h, t, current_kb, current_crect)
 
             # Auto-advance
             if slide_elapsed >= delay_ms:
                 begin_transition()
 
-        pygame.display.flip()
-        clock.tick(FPS)
+        renderer.present()
 
     pygame.quit()
 
