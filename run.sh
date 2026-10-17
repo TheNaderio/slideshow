@@ -88,8 +88,11 @@ setup_env() {
         if [[ "$import_name" == "pillow" ]]; then import_name="PIL"; fi
         # opencv-python-headless installs as cv2
         if [[ "$import_name" == "opencv_python_headless" ]]; then import_name="cv2"; fi
+        check="import $import_name"
+        # pygame-ce installs as pygame, but plain pygame must not count
+        if [[ "$import_name" == "pygame_ce" ]]; then check="import pygame; assert pygame.IS_CE"; fi
 
-        if ! "$DIR/venv/bin/python3" -c "import $import_name" &>/dev/null; then
+        if ! "$DIR/venv/bin/python3" -c "$check" &>/dev/null; then
             MISSING=1
             break
         fi
@@ -97,6 +100,8 @@ setup_env() {
 
     if [[ "$MISSING" -eq 1 ]]; then
         echo "Installing dependencies..."
+        # Plain pygame and pygame-ce share the same package folder
+        "$DIR/venv/bin/pip" uninstall --quiet --yes pygame &>/dev/null
         "$DIR/venv/bin/pip" install --quiet -r "$DIR/requirements.txt"
         if [[ $? -ne 0 ]]; then
             echo "Error: dependency installation failed."

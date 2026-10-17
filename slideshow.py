@@ -176,7 +176,7 @@ def prepare_image(path: str, screen_w: int, screen_h: int) -> tuple:
         focus_point = (px, py)
 
     raw = canvas.tobytes("raw", "RGB")
-    surface = pygame.image.fromstring(raw, canvas.size, "RGB")
+    surface = pygame.image.frombytes(raw, canvas.size, "RGB")
     return surface, content_rect, focus_point
 
 
