@@ -92,6 +92,8 @@ def detect_black_borders(img: Image.Image) -> tuple:
 
 
 _face_cascade = None
+# The cascade is not thread-safe, and preload and manual skips can detect at the same time
+_face_lock = threading.Lock()
 
 
 def _get_face_cascade():
@@ -113,7 +115,8 @@ def detect_face_focus(img: Image.Image):
     small = img.resize((int(w * scale), int(h * scale)), Image.BILINEAR)
 
     gray = np.array(small.convert("L"))
-    faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+    with _face_lock:
+        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
 
     if len(faces) == 0:
         return None
@@ -444,8 +447,6 @@ def main():
         transitioning = True
 
     while running:
-        now = pygame.time.get_ticks()
-
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -456,6 +457,10 @@ def main():
                     begin_transition()
                 elif event.key == pygame.K_LEFT:
                     begin_transition_prev()
+
+        # Read the clock after handling keys: a manual skip loads the next photo
+        # synchronously and sets trans_start, which must not be later than now
+        now = pygame.time.get_ticks()
 
         if transitioning:
             trans_elapsed = now - trans_start
