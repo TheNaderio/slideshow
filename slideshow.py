@@ -388,63 +388,31 @@ def main():
         texture.blend_mode = 1  # SDL_BLENDMODE_BLEND, so alpha works for the cross-fade
         return texture, crect, focus
 
-    # --- initial state ---
+    # --- slide stack ---
+    # Photos stacked bottom to top, each {"texture", "crect", "kb", "start"}.
+    # The top one is the current photo. Each fades in over the ones below it, which
+    # keep animating, so skipping quickly layers fades instead of cutting them off.
 
     index = 0
-    current_surface, current_crect, current_focus = get_image(index)
-    current_kb = new_kb_params(current_focus)
-    next_surface, next_crect, next_focus = None, None, None
-    next_kb = None
+    slides = []
 
-    # Preload next
+    def push_slide(idx):
+        texture, crect, focus = get_image(idx)
+        slides.append({"texture": texture, "crect": crect, "kb": new_kb_params(focus),
+                       "start": pygame.time.get_ticks()})
+
+    def advance(step):
+        nonlocal index
+        index = (index + step) % len(photos)
+        push_slide(index)
+        if step > 0:
+            preload((index + 1) % len(photos))
+
+    push_slide(index)
+    slides[0]["start"] -= trans_ms  # first photo appears without fading in
     preload((index + 1) % len(photos))
 
-    slide_start = pygame.time.get_ticks()
-    trans_start = None          # set when cross-fade begins
-    transitioning = False
-    frozen_frame = None         # last Ken Burns frame of current slide, used during fade-out
-
     running = True
-
-    def begin_transition():
-        nonlocal next_surface, next_crect, next_focus, next_kb
-        nonlocal trans_start, transitioning, frozen_frame, index
-        nonlocal slide_start, current_surface, current_crect, current_kb
-
-        now = pygame.time.get_ticks()
-        elapsed = now - slide_start
-        t = min(1.0, elapsed / delay_ms)
-        if current_surface and current_kb and current_crect:
-            frozen_frame = (current_surface, current_kb, current_crect, t)
-        else:
-            frozen_frame = None
-
-        index = (index + 1) % len(photos)
-        next_surface, next_crect, next_focus = get_image(index)
-        next_kb = new_kb_params(next_focus)
-        trans_start = pygame.time.get_ticks()
-        transitioning = True
-
-        preload((index + 1) % len(photos))
-
-    def begin_transition_prev():
-        nonlocal next_surface, next_crect, next_focus, next_kb
-        nonlocal trans_start, transitioning, frozen_frame, index
-        nonlocal slide_start, current_surface, current_crect, current_kb
-
-        now = pygame.time.get_ticks()
-        elapsed = now - slide_start
-        t = min(1.0, elapsed / delay_ms)
-        if current_surface and current_kb and current_crect:
-            frozen_frame = (current_surface, current_kb, current_crect, t)
-        else:
-            frozen_frame = None
-
-        index = (index - 1) % len(photos)
-        next_surface, next_crect, next_focus = get_image(index)
-        next_kb = new_kb_params(next_focus)
-        trans_start = pygame.time.get_ticks()
-        transitioning = True
 
     while running:
         for event in pygame.event.get():
@@ -454,54 +422,34 @@ def main():
                 if event.key in (pygame.K_ESCAPE, pygame.K_q):
                     running = False
                 elif event.key in (pygame.K_RIGHT, pygame.K_SPACE):
-                    begin_transition()
+                    advance(1)
                 elif event.key == pygame.K_LEFT:
-                    begin_transition_prev()
+                    advance(-1)
 
         # Read the clock after handling keys: a manual skip loads the next photo
-        # synchronously and sets trans_start, which must not be later than now
+        # synchronously and sets its start, which must not be later than now
         now = pygame.time.get_ticks()
 
-        if transitioning:
-            trans_elapsed = now - trans_start
-            alpha = min(255, int(255 * trans_elapsed / trans_ms))
+        # Drop photos hidden under one that has fully faded in
+        for i in range(len(slides) - 1, 0, -1):
+            if slides[i]["texture"] is not None and now - slides[i]["start"] >= trans_ms:
+                del slides[:i]
+                break
 
-            # Draw frozen outgoing frame
-            renderer.clear()
-            if frozen_frame:
-                tex, kb, crect, t_frozen = frozen_frame
-                draw_kb_frame(tex, screen_w, screen_h, t_frozen, kb, crect)
-
-            # Draw incoming frame with increasing alpha
-            if next_surface and next_kb and next_crect:
-                t_next = min(1.0, trans_elapsed / delay_ms)
-                draw_kb_frame(next_surface, screen_w, screen_h, t_next, next_kb, next_crect, alpha)
-
-            if trans_elapsed >= trans_ms:
-                # Transition done — next becomes current.
-                # Use trans_start (not now) so the Ken Burns t value is continuous
-                # through the transition and doesn't jump back to 0.
-                transitioning = False
-                current_surface = next_surface
-                current_crect = next_crect
-                current_kb = next_kb
-                next_surface, next_crect, next_focus = None, None, None
-                next_kb = None
-                frozen_frame = None
-                slide_start = trans_start
-        else:
-            slide_elapsed = now - slide_start
-            t = min(1.0, slide_elapsed / delay_ms)
-
-            renderer.clear()
-            if current_surface and current_kb and current_crect:
-                draw_kb_frame(current_surface, screen_w, screen_h, t, current_kb, current_crect)
-
-            # Auto-advance
-            if slide_elapsed >= delay_ms:
-                begin_transition()
-
+        renderer.clear()
+        for slide in slides:
+            if slide["texture"] is None:
+                continue
+            elapsed = now - slide["start"]
+            alpha = min(255, int(255 * elapsed / trans_ms))
+            # Ken Burns t keeps running from the start of the fade-in, so motion is continuous
+            draw_kb_frame(slide["texture"], screen_w, screen_h, min(1.0, elapsed / delay_ms),
+                          slide["kb"], slide["crect"], alpha)
         renderer.present()
+
+        # Auto-advance
+        if now - slides[-1]["start"] >= delay_ms:
+            advance(1)
 
     pygame.quit()
 
