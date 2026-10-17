@@ -5,6 +5,7 @@
 #   ./run.sh /path/to/photos [slideshow options]   # run only (existing behaviour)
 #   ./run.sh --export                              # export from Photos, then stop
 #   ./run.sh --export-and-run [slideshow options]  # export from Photos, then run
+#   ./run.sh --gui                                 # open the browser GUI
 #
 # Options applying to export modes:
 #   --output DIR   Destination folder (default: ~/Pictures/slideshow-photos)
@@ -32,6 +33,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --export-and-run)
             MODE="export-and-run"
+            shift
+            ;;
+        --gui)
+            MODE="gui"
             shift
             ;;
         --output)
@@ -122,6 +127,9 @@ case "$MODE" in
     export-and-run)
         "$DIR/venv/bin/python3" "$DIR/export.py" --output "$EXPORT_DIR" || exit 1
         "$DIR/venv/bin/python3" "$DIR/slideshow.py" "$EXPORT_DIR" "${SLIDESHOW_ARGS[@]}"
+        ;;
+    gui)
+        "$DIR/venv/bin/python3" "$DIR/gui.py"
         ;;
     *)
         # Default to the standard export folder if no path was given

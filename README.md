@@ -18,6 +18,7 @@ Apple Photos' built-in slideshow is great, but it doesn't let you control how lo
 - Second screen / projector support
 - Loops indefinitely through the photo library
 - Built-in Apple Photos export — pick an album from the command line, no manual export needed
+- Browser GUI to pick photos, export albums and control the running slideshow
 
 ## Requirements
 
@@ -44,6 +45,20 @@ To skip the setup check on subsequent runs:
 ```
 
 ## Usage
+
+### GUI
+
+```bash
+./run.sh --gui
+```
+
+Or double-click `Slideshow.command` in Finder. This opens a page in your browser where you can:
+
+- pick a photo folder, or export an Apple Photos album with a progress bar
+- set the delay, display and shuffle order (remembered for next time)
+- start the slideshow and control it while it runs: previous, pause, next, change the delay, stop — without touching the slideshow screen
+
+The GUI is served on `127.0.0.1` only and every request needs a random per-session token from the URL, so it isn't reachable from the network or from other websites. Settings are stored in `~/Library/Application Support/slideshow/settings.json`. Quit with **GUI beenden** on the page or Ctrl+C in the terminal.
 
 ### Quickstart — just run it
 
